@@ -1,3 +1,4 @@
+#include "text_timer.h"
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <MD_Parola.h>
@@ -10,11 +11,11 @@
 #define CLK_PIN   D5
 #define DATA_PIN  D7
 #define CS_PIN    D6
-MD_Parola myDisplay = MD_Parola(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES);
+extern MD_Parola myDisplay;
 
 // ==================== WIFI & SERVER SETUP ====================
-const char* ssid = "Nisha 4g";
-const char* password = "khush292009";
+extern const char* ssid;
+extern const char* password;
 ESP8266WebServer server(80);
 
 // ==================== VARIABLES ====================
@@ -43,6 +44,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     button{cursor:pointer;border:none;border-radius:5px;}
     .start{background:#4CAF50;color:white;}
     .stop{background:#f44336;color:white;}
+    .back{background:#2196F3;color:white;}
   </style>
 </head>
 <body>
@@ -64,6 +66,11 @@ const char index_html[] PROGMEM = R"rawliteral(
   <button class="stop" onclick="stopTimer()">Stop</button>
 </div>
 
+<div class="block">
+  <h2>Mode</h2>
+  <button class="back" onclick="backToTime()">Back to Time</button>
+</div>
+
 <script>
 function sendText(){
   let txt=document.getElementById('txt').value;
@@ -80,6 +87,9 @@ function startTimer(){
 function stopTimer(){
   fetch('/stoptimer');
 }
+function backToTime(){
+  fetch('/backtotime');
+}
 </script>
 
 </body>
@@ -87,29 +97,17 @@ function stopTimer(){
 )rawliteral";
 
 // ==================== SETUP ====================
-void setup() {
-  Serial.begin(115200);
-  myDisplay.begin();
-  myDisplay.setIntensity(5);
-  myDisplay.displayClear();
-  myDisplay.displayScroll("Start", PA_CENTER, PA_SCROLL_LEFT, 100);
-  textActive = true;
-  scrollMode = true;
-
-  // WiFi connect
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500); Serial.print(".");
-  }
-  Serial.println("\nWiFi Connected!");
-  Serial.println(WiFi.localIP());
-
+void text_timer_setup() {
   // Routes
   server.on("/", []() { server.send(200, "text/html", index_html); });
 
   // ====== TEXT ROUTES ======
   server.on("/text", []() {
+    // If timer is running, don't accept new text
+    if (timerRunning) {
+      server.send(409, "text/plain", "Timer is active. Please stop it first."); // 409 Conflict
+      return;
+    }
     if (server.hasArg("msg")) {
       currentText = server.arg("msg");
       currentText.trim();
@@ -132,14 +130,25 @@ void setup() {
   });
 
   server.on("/stoptext", []() {
+    if (!textActive) { // If text isn't active, do nothing.
+      server.send(200, "text/plain", "Already stopped");
+      return;
+    }
     textActive = false;
-    myDisplay.displayClear();
+    if (!timerRunning) { // Only clear if the timer isn't also running
+      myDisplay.displayClear();
+    }
     Serial.println("Text stopped");
     server.send(200, "text/plain", "Stopped");
   });
 
   // ====== TIMER ROUTES ======
   server.on("/starttimer", []() {
+    // If text is active, don't start the timer
+    if (textActive) {
+      server.send(409, "text/plain", "Text is active. Please stop it first."); // 409 Conflict
+      return;
+    }
     int m = server.arg("m").toInt();
     int s = server.arg("s").toInt();
     totalSeconds = (m * 60) + s;
@@ -152,10 +161,36 @@ void setup() {
   });
 
   server.on("/stoptimer", []() {
+    if (!timerRunning) { // If timer isn't running, do nothing.
+      server.send(200, "text/plain", "Already stopped");
+      return;
+    }
     timerRunning = false;
-    myDisplay.displayClear();
+    if (!textActive) { // Only clear if text isn't also active
+      myDisplay.displayClear();
+    }
     Serial.println("Timer stopped");
     server.send(200, "text/plain", "Timer stopped");
+  });
+
+  server.on("/backtotime", []() {
+    // If timer is running, require it to be stopped first
+    if (timerRunning) {
+      server.send(409, "text/plain", "Timer is active. Please stop it first.");
+      return;
+    }
+
+    // If text is active, stop it and return to time mode
+    if (textActive) {
+      textActive = false;
+      myDisplay.displayClear();
+      Serial.println("Returning to time display");
+      server.send(200, "text/plain", "OK");
+      return;
+    }
+
+    // If neither is active, we are already in time mode
+    server.send(200, "text/plain", "Already in time mode");
   });
 
   server.begin();
@@ -163,7 +198,7 @@ void setup() {
 }
 
 // ==================== LOOP ====================
-void loop() {
+void text_timer_loop() {
   server.handleClient();
 
   // ====== TEXT DISPLAY ======
@@ -201,4 +236,8 @@ void loop() {
       }
     }
   }
+}
+
+bool is_text_or_timer_active() {
+  return textActive || timerRunning;
 }
